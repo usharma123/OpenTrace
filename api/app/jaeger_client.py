@@ -66,7 +66,7 @@ class JaegerClient:
         Search for traces matching the given criteria.
 
         Args:
-            service: Filter by service name
+            service: Filter by service name (if not provided, searches all services)
             operation: Filter by operation name
             tags: Filter by span tags (key=value format)
             lookback: How far back to search (e.g., "1h", "24h")
@@ -77,12 +77,61 @@ class JaegerClient:
         Returns:
             List of trace data dictionaries
         """
+        # If no service specified, get all services and search each
+        if not service:
+            services = await self.get_services()
+            if not services:
+                return []
+            
+            # Search across all services and collect results
+            all_traces = []
+            per_service_limit = max(1, limit // len(services)) if services else limit
+            
+            for svc in services:
+                try:
+                    traces = await self._search_traces_for_service(
+                        service=svc,
+                        operation=operation,
+                        tags=tags,
+                        lookback=lookback,
+                        min_duration=min_duration,
+                        max_duration=max_duration,
+                        limit=per_service_limit
+                    )
+                    all_traces.extend(traces)
+                except Exception:
+                    # Skip services that fail
+                    continue
+            
+            # Sort by timestamp (most recent first) and limit
+            all_traces.sort(key=lambda t: t.get("spans", [{}])[0].get("startTime", 0), reverse=True)
+            return all_traces[:limit]
+        
+        return await self._search_traces_for_service(
+            service=service,
+            operation=operation,
+            tags=tags,
+            lookback=lookback,
+            min_duration=min_duration,
+            max_duration=max_duration,
+            limit=limit
+        )
+
+    async def _search_traces_for_service(
+        self,
+        service: str,
+        operation: Optional[str] = None,
+        tags: Optional[dict[str, str]] = None,
+        lookback: str = "1h",
+        min_duration: Optional[int] = None,
+        max_duration: Optional[int] = None,
+        limit: int = 20
+    ) -> list[dict]:
+        """Search traces for a specific service (internal helper)."""
         client = await self._get_client()
 
-        params = {"limit": limit, "lookback": lookback}
+        params = {"limit": limit, "lookback": lookback, "service": service}
 
-        if service:
-            params["service"] = service
         if operation:
             params["operation"] = operation
         if min_duration:

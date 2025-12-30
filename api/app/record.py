@@ -19,7 +19,8 @@ def is_path_allowed(path: str) -> bool:
 
 async def record_request(
     request: RecordRequest,
-    target_base_url: str = "http://127.0.0.1:8000"
+    target_base_url: str = "http://127.0.0.1:8000",
+    skip_allowlist: bool = False
 ) -> RecordResponse:
     """
     Execute a request against a target application and capture the trace ID.
@@ -27,14 +28,15 @@ async def record_request(
     Args:
         request: The request specification
         target_base_url: Base URL of the target application
+        skip_allowlist: If True, skip the path allowlist check (used for repo recording)
 
     Returns:
         RecordResponse with status, trace_id, and response body
     """
     settings = get_settings()
 
-    # Validate path is allowed
-    if not is_path_allowed(request.path):
+    # Validate path is allowed (skip for repo recordings)
+    if not skip_allowlist and not is_path_allowed(request.path):
         return RecordResponse(
             status=403,
             error=f"Path '{request.path}' is not in the allowlist for recording"

@@ -88,23 +88,78 @@ def generate_nodejs_dockerfile(
 ) -> str:
     """Generate a Dockerfile for Node.js applications with OTel instrumentation."""
 
+    # Build startup script content
+    script_lines = ['#!/bin/sh']
+    script_lines.append('')
+    script_lines.append('# Try detected entrypoint first (most reliable)')
     if entrypoint:
-        run_cmd = f'["node", "{entrypoint}"]'
-    else:
-        run_cmd = '["node", "index.js"]'
+        script_lines.append(f'if [ -f "{entrypoint}" ]; then')
+        script_lines.append(f'    echo "Starting with detected entrypoint: {entrypoint}"')
+        script_lines.append(f'    exec node "{entrypoint}"')
+        script_lines.append('fi')
+        script_lines.append('')
+    
+    # Try npm start, but catch errors
+    script_lines.append('# Try npm start (if package.json has start script)')
+    script_lines.append('if [ -f package.json ] && grep -q \'"start"\' package.json 2>/dev/null; then')
+    script_lines.append('    echo "Attempting: npm start"')
+    script_lines.append('    # Check if npm start would work by testing the command')
+    script_lines.append('    START_SCRIPT=$(node -p "require(\'./package.json\').scripts?.start || \'\'" 2>/dev/null || echo "")')
+    script_lines.append('    if [ -n "$START_SCRIPT" ]; then')
+    script_lines.append('        # Extract JS file from command (e.g., "node index.js" -> "index.js")')
+    script_lines.append('        JS_FILE=$(echo "$START_SCRIPT" | sed -n "s/.*node[[:space:]]*\\([^[:space:]]*\\.js\\).*/\\1/p" | head -1)')
+    script_lines.append('        if [ -n "$JS_FILE" ] && [ ! -f "$JS_FILE" ]; then')
+    script_lines.append('            echo "Warning: npm start references $JS_FILE which does not exist, skipping"')
+    script_lines.append('        else')
+    script_lines.append('            exec npm start')
+    script_lines.append('        fi')
+    script_lines.append('    else')
+    script_lines.append('        exec npm start')
+    script_lines.append('    fi')
+    script_lines.append('fi')
+    script_lines.append('')
+    
+    # Try common entrypoints
+    script_lines.append('# Try common entrypoints')
+    for common_file in ['index.js', 'app.js', 'server.js', 'src/index.js', 'src/app.js']:
+        script_lines.append(f'if [ -f "{common_file}" ]; then')
+        script_lines.append(f'    echo "Starting with: {common_file}"')
+        script_lines.append(f'    exec node "{common_file}"')
+        script_lines.append('fi')
+    
+    # Last resort: find any .js file in root
+    script_lines.append('')
+    script_lines.append('# Last resort: find any .js file in root directory')
+    script_lines.append('JS_FILE=$(find /app -maxdepth 1 -name "*.js" -type f | head -1)')
+    script_lines.append('if [ -n "$JS_FILE" ]; then')
+    script_lines.append('    echo "Starting with found file: $JS_FILE"')
+    script_lines.append('    exec node "$JS_FILE"')
+    script_lines.append('fi')
+    script_lines.append('')
+    
+    script_lines.append('echo "Error: No entrypoint found"')
+    script_lines.append('echo "Available .js files:"')
+    script_lines.append('find /app -name "*.js" -type f | head -10')
+    script_lines.append('exit 1')
+    
+    script_content = '\\n'.join(script_lines)
 
     dockerfile = f'''FROM node:20-slim
 
 WORKDIR /app
 
+# Install git for packages that need it
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+
 # Copy package files first for better caching
 COPY package*.json ./
 
-# Install dependencies
-RUN npm install
+# Install dependencies with legacy peer deps to avoid conflicts
+# Use --ignore-scripts to skip potentially problematic postinstall scripts
+RUN npm install --legacy-peer-deps --ignore-scripts || npm install --legacy-peer-deps || npm install || true
 
 # Install OpenTelemetry auto-instrumentation
-RUN npm install \\
+RUN npm install --legacy-peer-deps \\
     @opentelemetry/api \\
     @opentelemetry/auto-instrumentations-node \\
     @opentelemetry/exporter-trace-otlp-grpc \\
@@ -113,6 +168,15 @@ RUN npm install \\
 # Copy application code
 COPY . .
 
+# Create startup script
+RUN cat > /app/start.sh << 'EOF'
+{script_content}
+EOF
+RUN chmod +x /app/start.sh
+
+# Run npm rebuild to ensure native modules are properly built
+RUN npm rebuild 2>/dev/null || true
+
 # Environment variables for OpenTelemetry
 ENV OTEL_TRACES_EXPORTER=otlp
 ENV OTEL_EXPORTER_OTLP_PROTOCOL=grpc
@@ -120,7 +184,7 @@ ENV NODE_OPTIONS="--require @opentelemetry/auto-instrumentations-node/register"
 
 EXPOSE {port}
 
-CMD {run_cmd}
+CMD ["/app/start.sh"]
 '''
     return dockerfile
 

@@ -162,7 +162,7 @@ function App() {
             {jaegerConnected ? '● Jaeger connected' : '○ Jaeger disconnected'}
           </span>
 
-          <RecordButton onRecordComplete={handleRecordComplete} />
+          <RecordButton onRecordComplete={handleRecordComplete} activeRepo={activeRepo} />
 
           <a
             href="http://localhost:16686"

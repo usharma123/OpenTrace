@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   web:
     build: ./web
@@ -11,11 +9,8 @@ services:
     depends_on:
       - api
       - agent
-    develop:
-      watch:
-        - action: sync
-          path: ./web/src
-          target: /app/src
+    networks:
+      - opentrace-network
 
   api:
     build: ./api

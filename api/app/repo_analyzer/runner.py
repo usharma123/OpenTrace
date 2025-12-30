@@ -1,6 +1,7 @@
 """Build and run Docker containers for analyzed repositories."""
 
 import asyncio
+import os
 import docker
 from docker.errors import DockerException, ImageNotFound, APIError
 from typing import Optional
@@ -14,8 +15,19 @@ class ContainerRunner:
 
     def __init__(self):
         try:
-            self.client = docker.from_env()
+            # Try to connect using the Unix socket directly
+            socket_path = os.environ.get("DOCKER_HOST", "unix:///var/run/docker.sock")
+            if socket_path.startswith("unix://"):
+                self.client = docker.DockerClient(base_url=socket_path)
+            else:
+                self.client = docker.from_env()
+            # Verify connection works
+            self.client.ping()
+            logger.info("Successfully connected to Docker")
         except DockerException as e:
+            logger.warning(f"Failed to connect to Docker: {e}")
+            self.client = None
+        except Exception as e:
             logger.warning(f"Failed to connect to Docker: {e}")
             self.client = None
 
@@ -73,13 +85,25 @@ class ContainerRunner:
 
     def _build_sync(self, repo_path: str, image_tag: str, dockerfile_path: str):
         """Synchronous Docker build operation."""
-        self.client.images.build(
-            path=repo_path,
-            dockerfile="Dockerfile.opentrace",
-            tag=image_tag,
-            rm=True,  # Remove intermediate containers
-            forcerm=True,  # Always remove intermediate containers
-        )
+        try:
+            image, build_logs = self.client.images.build(
+                path=repo_path,
+                dockerfile="Dockerfile.opentrace",
+                tag=image_tag,
+                rm=True,  # Remove intermediate containers
+                forcerm=True,  # Always remove intermediate containers
+                network_mode="host",  # Use host network for npm/pip to access internet
+            )
+            # Log build output for debugging
+            for log in build_logs:
+                if 'stream' in log:
+                    logger.debug(log['stream'].strip())
+                elif 'error' in log:
+                    logger.error(f"Build error: {log['error']}")
+                    raise Exception(log['error'])
+        except Exception as e:
+            logger.error(f"Docker build failed: {e}")
+            raise
 
     async def run_container(
         self,
@@ -89,7 +113,7 @@ class ContainerRunner:
         host_port: int,
         service_name: str,
         otel_endpoint: str = "http://jaeger:4317",
-        network: str = "opentrace-network"
+        network: str = "opentrace_opentrace-network"
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Run a container from an image.
@@ -117,7 +141,7 @@ class ContainerRunner:
             except Exception:
                 pass
 
-            # Run container
+            # Run container with network
             container = self.client.containers.run(
                 image_tag,
                 name=container_name,
@@ -129,6 +153,8 @@ class ContainerRunner:
                 },
                 network=network,
             )
+            
+            logger.info(f"Started container {container_name} on network {network}")
 
             return container.id, None
 

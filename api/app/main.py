@@ -281,11 +281,9 @@ async def record_trace(request: RecordRequest):
     """
     Record a new trace by making a request to the target application.
 
-    Only paths matching the allowlist patterns are permitted.
+    Only paths matching the allowlist patterns are permitted (unless targeting a repo).
     """
-    settings = get_settings()
-
-    # If recording to a repo container, use that port
+    # If recording to a repo container, use that port and skip allowlist
     if request.repo_id:
         repo_manager = get_repo_manager()
         repo = repo_manager.get_repo(request.repo_id)
@@ -294,12 +292,31 @@ async def record_trace(request: RecordRequest):
                 status_code=404,
                 detail=f"Repository {request.repo_id} not found"
             )
-        target_url = f"http://127.0.0.1:{repo.port}"
+        if repo.status != "running":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Repository {request.repo_id} is not running (status: {repo.status})"
+            )
+        
+        # Try container name first (if on same Docker network), then fallback
+        from .models import RepoLanguage
+        container_name = f"opentrace-{repo.repo_id}"
+        internal_port = 8000 if repo.language == RepoLanguage.PYTHON else 3000
+        
+        # Try container name first
+        target_url = f"http://{container_name}:{internal_port}"
+        result = await record_request(request, target_url, skip_allowlist=True)
+        
+        # If connection failed, try host.docker.internal
+        if result.error and "Failed to connect" in result.error:
+            target_url = f"http://host.docker.internal:{repo.port}"
+            result = await record_request(request, target_url, skip_allowlist=True)
+        
+        return result
     else:
         # Record to self (this API)
         target_url = "http://127.0.0.1:8000"
-
-    return await record_request(request, target_url)
+        return await record_request(request, target_url)
 
 
 # === Repo Analysis Endpoints ===
