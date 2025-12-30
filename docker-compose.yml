@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  web:
+    build: ./web
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+      - VITE_AGENT_URL=http://localhost:8081
+    depends_on:
+      - api
+      - agent
+    develop:
+      watch:
+        - action: sync
+          path: ./web/src
+          target: /app/src
+
+  api:
+    build: ./api
+    ports:
+      - "8000:8000"
+    environment:
+      - JAEGER_QUERY_URL=http://jaeger:16686
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - OTEL_SERVICE_NAME=opentrace-api
+      - OTEL_TRACES_EXPORTER=otlp
+      - APPROVAL_REQUIRED=${APPROVAL_REQUIRED:-true}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - repos_data:/tmp/repos
+    depends_on:
+      jaeger:
+        condition: service_healthy
+    networks:
+      - opentrace-network
+
+  agent:
+    build: ./agent
+    ports:
+      - "8081:8081"
+    environment:
+      - API_URL=http://api:8000
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-anthropic/claude-3.5-sonnet}
+      - APPROVAL_REQUIRED=${APPROVAL_REQUIRED:-true}
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - api
+    networks:
+      - opentrace-network
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.54
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:16686"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - opentrace-network
+
+volumes:
+  repos_data:
+
+networks:
+  opentrace-network:
+    driver: bridge
