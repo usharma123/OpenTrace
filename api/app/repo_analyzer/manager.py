@@ -9,8 +9,9 @@ import git
 import logging
 
 from ..config import get_settings
-from ..models import RepoInfo, RepoStatus, RepoLanguage
+from ..models import RepoInfo, RepoStatus, RepoLanguage, RepoFramework
 from .analyzer import RepoAnalyzer
+from .agent_analyzer import AgentAnalyzer
 from .dockerfile_gen import generate_dockerfile
 from .runner import get_container_runner
 
@@ -23,6 +24,7 @@ class RepoManager:
     def __init__(self):
         self.settings = get_settings()
         self.repos: dict[str, RepoInfo] = {}
+        self._agent_analysis: dict[str, dict] = {}  # Store agent analysis results
         self._port_counter = 9000  # Start assigning ports from 9000
 
     def _get_next_port(self) -> int:
@@ -46,7 +48,7 @@ class RepoManager:
 
     async def analyze(self, github_url: str, branch: Optional[str] = None) -> RepoInfo:
         """
-        Analyze a GitHub repository.
+        Analyze a GitHub repository using AI agent.
 
         Args:
             github_url: URL of the GitHub repository
@@ -84,21 +86,44 @@ class RepoManager:
                 branch
             )
 
-            # Analyze the repo
-            analyzer = RepoAnalyzer(str(repo_path))
-            analysis = analyzer.analyze()
+            # Use AI agent to analyze the repo
+            agent = AgentAnalyzer(str(repo_path))
+            analysis = await agent.analyze()
+
+            logger.info(f"Agent analysis result: {analysis.get('explanation', 'No explanation')}")
+
+            # Map string values to enums
+            language_map = {
+                "python": RepoLanguage.PYTHON,
+                "nodejs": RepoLanguage.NODEJS,
+            }
+            framework_map = {
+                "fastapi": RepoFramework.FASTAPI,
+                "flask": RepoFramework.FLASK,
+                "django": RepoFramework.DJANGO,
+                "express": RepoFramework.EXPRESS,
+                "fastify": RepoFramework.FASTIFY,
+                "nestjs": RepoFramework.NESTJS,
+            }
 
             # Update repo info
-            repo_info.language = analysis["language"]
-            repo_info.framework = analysis["framework"]
-            repo_info.entrypoint = analysis["entrypoint"]
+            repo_info.language = language_map.get(analysis.get("language", "").lower(), RepoLanguage.UNKNOWN)
+            repo_info.framework = framework_map.get(analysis.get("framework", "").lower(), RepoFramework.UNKNOWN)
+            repo_info.entrypoint = analysis.get("entrypoint")
             repo_info.status = RepoStatus.READY
 
+            # Store agent analysis for use during build
+            self._agent_analysis[repo_id] = analysis
+
             # Try to detect endpoints (simplified)
-            if analysis["entrypoint"]:
+            effective_path = repo_path
+            if analysis.get("backend_dir") and analysis["backend_dir"] != ".":
+                effective_path = repo_path / analysis["backend_dir"]
+
+            if analysis.get("entrypoint"):
                 repo_info.endpoints = self._detect_endpoints(
-                    repo_path,
-                    analysis["language"],
+                    effective_path,
+                    repo_info.language,
                     analysis["entrypoint"]
                 )
 
@@ -185,20 +210,37 @@ class RepoManager:
 
             repo_path = Path(self.settings.repos_base_path) / repo_id
 
-            # Generate Dockerfile
-            dockerfile = generate_dockerfile(
-                language=repo_info.language,
-                framework=repo_info.framework,
-                entrypoint=repo_info.entrypoint,
-                port=8000 if repo_info.language == RepoLanguage.PYTHON else 3000
-            )
+            # Get agent analysis if available
+            analysis = self._agent_analysis.get(repo_id, {})
+
+            # Determine build path (may be a subdirectory for monorepos)
+            backend_dir = analysis.get("backend_dir", ".")
+            if backend_dir and backend_dir != ".":
+                build_path = repo_path / backend_dir
+                logger.info(f"Building from subdirectory: {backend_dir}")
+            else:
+                build_path = repo_path
+
+            # Use agent-generated Dockerfile if available, otherwise fall back to generated one
+            dockerfile = analysis.get("dockerfile")
+            if not dockerfile:
+                logger.info("No agent dockerfile, using generated one")
+                internal_port = analysis.get("port", 8000 if repo_info.language == RepoLanguage.PYTHON else 3000)
+                dockerfile = generate_dockerfile(
+                    language=repo_info.language,
+                    framework=repo_info.framework,
+                    entrypoint=repo_info.entrypoint,
+                    port=internal_port
+                )
+            else:
+                logger.info("Using agent-generated Dockerfile")
 
             # Build image
             runner = get_container_runner()
             image_tag = f"opentrace-{repo_id}:latest"
 
             success, error = await runner.build_image(
-                str(repo_path),
+                str(build_path),
                 image_tag,
                 dockerfile
             )
@@ -210,7 +252,7 @@ class RepoManager:
                 return repo_info
 
             # Run container
-            internal_port = 8000 if repo_info.language == RepoLanguage.PYTHON else 3000
+            internal_port = analysis.get("port", 8000 if repo_info.language == RepoLanguage.PYTHON else 3000)
             container_name = f"opentrace-{repo_id}"
             service_name = repo_id.split("-")[0]  # Use repo name as service
 

@@ -85,6 +85,7 @@ class ContainerRunner:
 
     def _build_sync(self, repo_path: str, image_tag: str, dockerfile_path: str):
         """Synchronous Docker build operation."""
+        build_output = []
         try:
             image, build_logs = self.client.images.build(
                 path=repo_path,
@@ -97,13 +98,22 @@ class ContainerRunner:
             # Log build output for debugging
             for log in build_logs:
                 if 'stream' in log:
-                    logger.debug(log['stream'].strip())
+                    msg = log['stream'].strip()
+                    if msg:
+                        build_output.append(msg)
+                        logger.debug(msg)
                 elif 'error' in log:
-                    logger.error(f"Build error: {log['error']}")
-                    raise Exception(log['error'])
+                    error_msg = log['error']
+                    build_output.append(f"ERROR: {error_msg}")
+                    logger.error(f"Build error: {error_msg}")
+                    raise Exception(f"Build error: {error_msg}\n\nBuild log:\n" + "\n".join(build_output[-20:]))
+            logger.info(f"Successfully built image {image_tag}")
         except Exception as e:
-            logger.error(f"Docker build failed: {e}")
-            raise
+            # Include last 30 lines of build output in error for debugging
+            error_context = "\n".join(build_output[-30:]) if build_output else "No build output captured"
+            full_error = f"Docker build failed: {e}\n\nLast build output:\n{error_context}"
+            logger.error(full_error)
+            raise Exception(full_error)
 
     async def run_container(
         self,

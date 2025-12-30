@@ -41,14 +41,33 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     gcc \\
+    libpq-dev \\
     && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency files first for better caching
-COPY requirements.txt* pyproject.toml* setup.py* ./
+# Copy all files first (dependency files may vary)
+COPY . .
 
-# Install Python dependencies
-RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
-RUN if [ -f pyproject.toml ]; then pip install --no-cache-dir .; fi
+# Install Python dependencies with multiple fallback strategies
+RUN if [ -f requirements.txt ]; then \\
+        echo "Installing from requirements.txt..." && \\
+        pip install --no-cache-dir -r requirements.txt; \\
+    elif [ -f pyproject.toml ]; then \\
+        echo "Installing from pyproject.toml..." && \\
+        pip install --no-cache-dir poetry 2>/dev/null || true && \\
+        if command -v poetry &> /dev/null && grep -q "tool.poetry" pyproject.toml 2>/dev/null; then \\
+            echo "Using Poetry..." && \\
+            poetry config virtualenvs.create false && \\
+            poetry install --no-interaction --no-ansi || pip install --no-cache-dir . || true; \\
+        else \\
+            echo "Using pip with pyproject.toml..." && \\
+            pip install --no-cache-dir . || pip install --no-cache-dir -e . || true; \\
+        fi; \\
+    elif [ -f setup.py ]; then \\
+        echo "Installing from setup.py..." && \\
+        pip install --no-cache-dir . || true; \\
+    else \\
+        echo "No dependency file found, skipping dependency installation"; \\
+    fi
 
 # Install OpenTelemetry instrumentation
 RUN pip install --no-cache-dir \\
@@ -65,9 +84,6 @@ RUN pip install --no-cache-dir \\
 
 # Auto-install all available instrumentations
 RUN opentelemetry-bootstrap -a install || true
-
-# Copy application code
-COPY . .
 
 # Environment variables for OpenTelemetry
 ENV OTEL_TRACES_EXPORTER=otlp
@@ -142,7 +158,7 @@ def generate_nodejs_dockerfile(
     script_lines.append('find /app -name "*.js" -type f | head -10')
     script_lines.append('exit 1')
     
-    script_content = '\\n'.join(script_lines)
+    script_content = '\n'.join(script_lines)
 
     dockerfile = f'''FROM node:20-slim
 
@@ -151,22 +167,26 @@ WORKDIR /app
 # Install git for packages that need it
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
-# Copy package files first for better caching
-COPY package*.json ./
+# Copy all files (package.json may or may not exist)
+COPY . .
 
-# Install dependencies with legacy peer deps to avoid conflicts
-# Use --ignore-scripts to skip potentially problematic postinstall scripts
-RUN npm install --legacy-peer-deps --ignore-scripts || npm install --legacy-peer-deps || npm install || true
+# Install dependencies with multiple fallback strategies
+RUN if [ -f package.json ]; then \\
+        echo "Installing from package.json..." && \\
+        npm install --legacy-peer-deps --ignore-scripts 2>/dev/null || \\
+        npm install --legacy-peer-deps 2>/dev/null || \\
+        npm install 2>/dev/null || \\
+        echo "npm install failed, continuing anyway..."; \\
+    else \\
+        echo "No package.json found, skipping npm install"; \\
+    fi
 
 # Install OpenTelemetry auto-instrumentation
 RUN npm install --legacy-peer-deps \\
     @opentelemetry/api \\
     @opentelemetry/auto-instrumentations-node \\
     @opentelemetry/exporter-trace-otlp-grpc \\
-    @opentelemetry/sdk-node
-
-# Copy application code
-COPY . .
+    @opentelemetry/sdk-node 2>/dev/null || true
 
 # Create startup script
 RUN cat > /app/start.sh << 'EOF'

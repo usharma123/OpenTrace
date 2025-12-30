@@ -10,30 +10,74 @@ import toml
 from ..models import RepoLanguage, RepoFramework
 
 
+# Common subdirectory names for backend services
+BACKEND_SUBDIRS = ["server", "backend", "api", "src/server", "src/api", "src/backend"]
+
+
 class RepoAnalyzer:
     """Analyzes a cloned repository to detect its configuration."""
 
     def __init__(self, repo_path: str):
         self.repo_path = Path(repo_path)
+        self.backend_subdir: Optional[str] = None  # Track if backend is in a subdirectory
+
+    def _find_backend_subdir(self) -> Optional[str]:
+        """
+        Check if this is a monorepo and find the backend service subdirectory.
+        Returns the subdirectory name if found, None otherwise.
+        """
+        for subdir in BACKEND_SUBDIRS:
+            subdir_path = self.repo_path / subdir
+            if subdir_path.exists() and subdir_path.is_dir():
+                # Check if this subdir has Python backend indicators
+                if any([
+                    (subdir_path / "requirements.txt").exists(),
+                    (subdir_path / "pyproject.toml").exists(),
+                    (subdir_path / "app.py").exists(),
+                    (subdir_path / "main.py").exists(),
+                ]):
+                    return subdir
+                # Check if this subdir has Node.js backend indicators (with express/fastify)
+                pkg_file = subdir_path / "package.json"
+                if pkg_file.exists():
+                    try:
+                        data = json.loads(pkg_file.read_text())
+                        deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
+                        # Only consider it a backend if it has backend frameworks
+                        if any(fw in deps for fw in ["express", "fastify", "@nestjs/core", "koa", "hapi"]):
+                            return subdir
+                    except Exception:
+                        pass
+        return None
+
+    def _get_effective_path(self) -> Path:
+        """Get the effective path for analysis (backend subdir or root)."""
+        if self.backend_subdir:
+            return self.repo_path / self.backend_subdir
+        return self.repo_path
 
     def detect_language(self) -> RepoLanguage:
         """Detect the primary programming language of the repository."""
-        # Check for Node.js indicators
-        if (self.repo_path / "package.json").exists():
-            return RepoLanguage.NODEJS
+        # First, check if this is a monorepo with a backend subdirectory
+        self.backend_subdir = self._find_backend_subdir()
+        effective_path = self._get_effective_path()
 
-        # Check for Python indicators
+        # Check for Python indicators (prioritize Python for backend services)
         if any([
-            (self.repo_path / "requirements.txt").exists(),
-            (self.repo_path / "pyproject.toml").exists(),
-            (self.repo_path / "setup.py").exists(),
-            (self.repo_path / "Pipfile").exists(),
+            (effective_path / "requirements.txt").exists(),
+            (effective_path / "pyproject.toml").exists(),
+            (effective_path / "setup.py").exists(),
+            (effective_path / "Pipfile").exists(),
         ]):
             return RepoLanguage.PYTHON
 
+        # Check for Node.js indicators
+        if (effective_path / "package.json").exists():
+            return RepoLanguage.NODEJS
+
         # Check file extensions as fallback
-        py_files = list(self.repo_path.glob("**/*.py"))
-        js_files = list(self.repo_path.glob("**/*.js")) + list(self.repo_path.glob("**/*.ts"))
+        py_files = list(effective_path.glob("**/*.py"))
+        js_files = list(effective_path.glob("**/*.js")) + list(effective_path.glob("**/*.ts"))
 
         if len(py_files) > len(js_files):
             return RepoLanguage.PYTHON
@@ -52,8 +96,10 @@ class RepoAnalyzer:
 
     def _detect_python_framework(self) -> RepoFramework:
         """Detect Python web framework from dependencies."""
+        effective_path = self._get_effective_path()
+
         # Check requirements.txt
-        req_file = self.repo_path / "requirements.txt"
+        req_file = effective_path / "requirements.txt"
         if req_file.exists():
             content = req_file.read_text().lower()
             if "fastapi" in content:
@@ -64,7 +110,7 @@ class RepoAnalyzer:
                 return RepoFramework.DJANGO
 
         # Check pyproject.toml
-        pyproject = self.repo_path / "pyproject.toml"
+        pyproject = effective_path / "pyproject.toml"
         if pyproject.exists():
             try:
                 data = toml.load(pyproject)
@@ -92,7 +138,8 @@ class RepoAnalyzer:
 
     def _detect_nodejs_framework(self) -> RepoFramework:
         """Detect Node.js web framework from package.json."""
-        pkg_file = self.repo_path / "package.json"
+        effective_path = self._get_effective_path()
+        pkg_file = effective_path / "package.json"
         if not pkg_file.exists():
             return RepoFramework.UNKNOWN
 
@@ -122,6 +169,8 @@ class RepoAnalyzer:
 
     def _find_python_entrypoint(self, framework: RepoFramework) -> Optional[str]:
         """Find Python application entry point."""
+        effective_path = self._get_effective_path()
+
         # Common entry point files
         candidates = [
             "main.py",
@@ -134,7 +183,7 @@ class RepoAnalyzer:
         ]
 
         for candidate in candidates:
-            path = self.repo_path / candidate
+            path = effective_path / candidate
             if path.exists():
                 # Verify it has a FastAPI/Flask/Django app
                 content = path.read_text()
@@ -149,7 +198,7 @@ class RepoAnalyzer:
                     return candidate
 
         # Check pyproject.toml for scripts
-        pyproject = self.repo_path / "pyproject.toml"
+        pyproject = effective_path / "pyproject.toml"
         if pyproject.exists():
             try:
                 data = toml.load(pyproject)

@@ -22,11 +22,16 @@ services:
       - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
       - OTEL_SERVICE_NAME=opentrace-api
       - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_METRICS_EXPORTER=none
       - APPROVAL_REQUIRED=${APPROVAL_REQUIRED:-true}
       - PYTHONUNBUFFERED=1
+      - DOCKER_CONFIG=/docker-config
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-minimax/minimax-m2.1}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - repos_data:/tmp/repos
+      - ./api/docker-config.json:/docker-config/config.json:ro
     depends_on:
       jaeger:
         condition: service_healthy
@@ -40,7 +45,7 @@ services:
     environment:
       - API_URL=http://api:8000
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-anthropic/claude-3.5-sonnet}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-minimax/minimax-m2.1}
       - APPROVAL_REQUIRED=${APPROVAL_REQUIRED:-true}
       - PYTHONUNBUFFERED=1
     depends_on:
